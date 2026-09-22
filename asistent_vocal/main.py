@@ -2,17 +2,44 @@ import whisper
 import sounddevice as sd
 import numpy as np
 import sympy as sp
-import pyttsx3
+import subprocess
 import scipy.signal
 import re
 
-sd.default.device = 32
 fs = 48000
+
+def setup_audio_devices():
+    devices = sd.query_devices()
+
+    input_device = None
+    output_device = None
+
+    for i, device in enumerate(devices):
+        name = device["name"]
+
+        if "C170" in name and device["max_input_channels"] > 0:
+            input_device = i
+
+        if device["max_output_channels"] > 0 and output_device is None:
+            output_device = i
+
+    if input_device is None:
+        raise RuntimeError("Microphone C170 was not found.")
+
+    sd.default.device = input_device
+
+    print("Input device:", input_device, devices[input_device]["name"])
+
+    if output_device is not None:
+        print("Output device:", output_device, devices[output_device]["name"])
+    else:
+        print("Output device: none detected by sounddevice")
+
+setup_audio_devices()
 
 print("Loading Whisper model...")
 model = whisper.load_model("base")
 
-tts = pyttsx3.init()
 
 x = sp.Symbol("x")
 
@@ -60,6 +87,7 @@ VOCAB = {
     "parentheses": "",
     "bracket": "",
     "brackets": "",
+    "per": "/",
 
     "x": "x",
     "pi": "pi",
@@ -80,7 +108,11 @@ NUMBER_WORDS = {
     "seven": "7",
     "eight": "8",
     "nine": "9",
-    "ten": "10"
+    "ten": "10",
+    "hundred": "100",
+    "thousand": "1000",
+    "million": "1000000",
+    "millions": "1000000"    
 }
 
 IGNORE_WORDS = {
@@ -98,7 +130,7 @@ IGNORE_WORDS = {
     "find"
 }
 
-def record_audio(sample_rate=fs, max_duration=30, silence_duration=1.4, threshold=0.012):
+def record_audio(sample_rate=fs, max_duration=10, silence_duration=1.4, threshold=0.012):
     print(">> Speak now...")
 
     audio_chunks = []
@@ -173,7 +205,9 @@ def autocorrect(text):
 
         "derivative of": "derivative",
         "differentiate": "derivative",
-
+        
+        "x squared": "x power 2",
+        "x cubed": "x power 3",
         "x square": "x squared",
         "x to the power of two": "x squared",
         "x to the power of 2": "x squared",
@@ -205,6 +239,16 @@ def autocorrect(text):
         ".": "",
         ",": ""
     }
+    
+    text = re.sub(r"x to the power of (\d+)", r"x power \1", text)
+    text = re.sub(r"x to the power of one", "x power 1", text)
+    text = re.sub(r"x to the power of two", "x power 2", text)
+    text = re.sub(r"x to the power of three", "x power 3", text)
+    text = re.sub(r"x to the power of four", "x power 4", text)
+    text = re.sub(r"x to the power of five", "x power 5", text)
+    text = re.sub(r"(\d+)\s+million", r"\1 * 1000000", text)
+    text = re.sub(r"(\d+)\s+millions", r"\1 * 1000000", text)
+    text = re.sub(r"(\d+)\s+thousand", r"\1 * 1000", text)
 
     for k, v in fixes.items():
         text = text.replace(k, v)
@@ -378,7 +422,7 @@ def parse_integral(tokens):
 
         expr_string = build_expression(expr_tokens)
 
-        print("🔹 Expr:", expr_string)
+        print("Expr:", expr_string)
 
         expr = sp.sympify(expr_string, locals=locals_dict)
 
@@ -396,7 +440,7 @@ def parse_integral(tokens):
 
     expr_string = build_expression(expr_tokens)
 
-    print("🔹 Expr:", expr_string)
+    print("Expr:", expr_string)
 
     expr = sp.sympify(expr_string, locals=locals_dict)
 
@@ -413,7 +457,7 @@ def parse_derivative(tokens):
 
     expr_string = build_expression(expr_tokens)
 
-    print("🔹 Expr:", expr_string)
+    print("Expr:", expr_string)
 
     expr = sp.sympify(expr_string, locals=locals_dict)
 
@@ -423,30 +467,31 @@ def parse_expression(tokens):
 
     expr_string = build_expression(tokens)
 
-    print("🔹 Expr:", expr_string)
+    print("Expr:", expr_string)
 
     expr = sp.sympify(expr_string, locals=locals_dict)
 
     return expr.evalf()
 
 def format_result(result):
-
-    result = sp.N(result, 6)
+    result = sp.N(result)
 
     try:
-        if result == int(result):
-            return str(int(result))
+        value = float(result)
+
+        if value.is_integer():
+            return str(int(value))
+
+        return f"{value:.2f}".rstrip("0").rstrip(".")
 
     except Exception:
-        pass
-
-    return str(result)
+        return str(result)
 
 def interpret_math(text):
 
     tokens = tokenize(text)
 
-    print("🔹 Tokens:", tokens)
+    print("Tokens:", tokens)
 
     try:
 
@@ -459,6 +504,9 @@ def interpret_math(text):
             "OF" in tokens
         ):
             result = parse_integral(tokens)
+            if result.free_symbols:
+                return str(result)
+                
             return format_result(result)
 
         if "DERIVATIVE" in tokens:
@@ -473,30 +521,61 @@ def interpret_math(text):
         print("Eroare interpretare:", e)
         return None
 
+def format_spoken_result(result):
+    text = str(result)
+
+    text = text.replace("**", " to the power of ")
+    text = text.replace("*", " times ")
+    text = text.replace("/", " divided by ")
+    text = text.replace("+", " plus ")
+    text = text.replace("-", " minus ")
+
+    text = re.sub(r"\s+", " ", text).strip()
+
+    return text
+
 def speak(text):
 
-    tts.say(text)
-    tts.runAndWait()
+    subprocess.run(["espeak", str(text)], check=False)
 
 def main():
+    speak("Math assistant started.")
 
-    audio = record_audio()
+    while True:
+        audio = record_audio()
 
-    text, language = transcribe(audio)
+        if audio.size == 0:
+            continue
 
-    print(f"You said ({language}): {text}")
+        text, language = transcribe(audio)
 
-    result = interpret_math(text)
+        print(f"You said ({language}): {text}")
 
-    if result is None:
-        message = "I could not interpret the expression."
+        text_lower = text.lower()
 
-    else:
-        message = f"The result is {result}"
+        wake_words = [
+            "math assistant",
+            "assistant",
+            "calculate",
+            "compute",
+            "integral",
+            "derivative",
+            "solve"
+        ]
 
-    print(">>", message)
+        if not any(word in text_lower for word in wake_words):
+            print(">> Ignored. No math request detected.")
+            continue
 
-    speak(message)
+        result = interpret_math(text)
 
+        if result is None:
+            message = "I could not interpret the expression."
+        else:
+            spoken_result = format_spoken_result(result)
+            message = f"The result is {spoken_result}"
+
+        print(">>", message)
+        speak(message)
 if __name__ == "__main__":
     main()
